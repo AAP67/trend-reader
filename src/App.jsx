@@ -1,11 +1,17 @@
 import { useState, useRef, useCallback, useEffect } from "react";
 import * as XLSX from "xlsx";
+import {
+  LineChart, Line, BarChart, Bar, AreaChart, Area,
+  XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend,
+} from "recharts";
 
 const SEVERITY_COLORS = {
   high: { bg: "#1a0f0f", border: "#7f1d1d", badge: "#dc2626", text: "#fca5a5" },
   medium: { bg: "#1a1508", border: "#78350f", badge: "#d97706", text: "#fcd34d" },
   low: { bg: "#0a1a14", border: "#064e3b", badge: "#059669", text: "#6ee7b7" },
 };
+
+const CHART_COLORS = ["#4f8ffa", "#a78bfa", "#34d399", "#fbbf24", "#f87171", "#818cf8"];
 
 const SYSTEM_PROMPT = `You are an elite strategic finance analyst. You receive a dataset (as JSON rows) and the user's analytical objective.
 
@@ -62,9 +68,234 @@ Rules:
 - If the user asks you to drill into something, give granular detail
 - If the user asks a "what if" scenario, model it with the data you have and state assumptions clearly
 - Keep responses concise but thorough — 2-4 paragraphs max unless they ask for more
-- Use plain text, not JSON — this is a conversation now
-- If you need to reference numbers, use inline formatting
-- Be opinionated and direct — don't hedge`;
+- You can use **bold** for emphasis
+- Be opinionated and direct — don't hedge
+
+CHARTS:
+When the user asks you to "chart", "graph", "visualize", "show me a chart", or "plot" something, include a chart specification in your response using this exact format:
+
+|||CHART|||
+{
+  "type": "bar",
+  "title": "Chart Title",
+  "xKey": "category_field",
+  "lines": [
+    { "key": "value_field", "label": "Display Label" }
+  ],
+  "data": [
+    { "category_field": "Label1", "value_field": 100 },
+    { "category_field": "Label2", "value_field": 200 }
+  ]
+}
+|||ENDCHART|||
+
+Chart rules:
+- type must be one of: "line", "bar", "area"
+- Use "line" for trends over time, "bar" for comparisons, "area" for cumulative/stacked data
+- xKey is the field used for the x-axis
+- lines is an array of series to plot, each with "key" (data field) and "label" (display name)
+- data is the array of data points with values for xKey and all line keys
+- You can include multiple lines/series for comparison charts
+- Always include the chart spec AND a text explanation around it
+- Compute the data from the dataset context — do not make up numbers
+- Keep data points reasonable (5-15 points ideal)`;
+
+// Simple markdown renderer for **bold** and *italic*
+function renderMarkdown(text) {
+  const parts = [];
+  let remaining = text;
+  let key = 0;
+
+  while (remaining.length > 0) {
+    // Bold: **text**
+    const boldMatch = remaining.match(/\*\*(.+?)\*\*/);
+    if (boldMatch) {
+      const idx = boldMatch.index;
+      if (idx > 0) {
+        parts.push(<span key={key++}>{remaining.slice(0, idx)}</span>);
+      }
+      parts.push(
+        <span key={key++} style={{ color: "#e2e4ed", fontWeight: 600 }}>
+          {boldMatch[1]}
+        </span>
+      );
+      remaining = remaining.slice(idx + boldMatch[0].length);
+    } else {
+      parts.push(<span key={key++}>{remaining}</span>);
+      break;
+    }
+  }
+
+  return parts;
+}
+
+// Parse chat response into text blocks and chart blocks
+function parseChatResponse(content) {
+  const blocks = [];
+  let remaining = content;
+
+  while (remaining.length > 0) {
+    const chartStart = remaining.indexOf("|||CHART|||");
+    if (chartStart === -1) {
+      if (remaining.trim()) blocks.push({ type: "text", content: remaining.trim() });
+      break;
+    }
+
+    // Text before chart
+    const textBefore = remaining.slice(0, chartStart).trim();
+    if (textBefore) blocks.push({ type: "text", content: textBefore });
+
+    const chartEnd = remaining.indexOf("|||ENDCHART|||", chartStart);
+    if (chartEnd === -1) {
+      blocks.push({ type: "text", content: remaining.slice(chartStart).trim() });
+      break;
+    }
+
+    const chartJson = remaining.slice(chartStart + 11, chartEnd).trim();
+    try {
+      const clean = chartJson.replace(/```json|```/g, "").trim();
+      const chartData = JSON.parse(clean);
+      blocks.push({ type: "chart", content: chartData });
+    } catch (e) {
+      blocks.push({ type: "text", content: "[Chart failed to render]" });
+    }
+
+    remaining = remaining.slice(chartEnd + 14);
+  }
+
+  return blocks;
+}
+
+// Chart renderer
+function ChartBlock({ spec }) {
+  const { type, title, xKey, lines, data } = spec;
+
+  if (!data || !data.length || !lines || !lines.length) {
+    return <div style={{ color: "#6b7089", fontSize: 13 }}>[No chart data]</div>;
+  }
+
+  const ChartComponent = type === "line" ? LineChart : type === "area" ? AreaChart : BarChart;
+  const DataComponent = type === "line" ? Line : type === "area" ? Area : Bar;
+
+  return (
+    <div style={{
+      background: "#0d0e14",
+      border: "1px solid #1e2030",
+      borderRadius: 10,
+      padding: "16px 12px 8px 0",
+      margin: "12px 0",
+    }}>
+      {title && (
+        <div style={{
+          fontSize: 12, fontWeight: 600, color: "#6b7089",
+          letterSpacing: "0.04em", textTransform: "uppercase",
+          marginBottom: 12, paddingLeft: 16,
+          fontFamily: "'DM Mono', monospace",
+        }}>{title}</div>
+      )}
+      <ResponsiveContainer width="100%" height={240}>
+        <ChartComponent data={data} margin={{ top: 5, right: 20, left: 10, bottom: 5 }}>
+          <CartesianGrid strokeDasharray="3 3" stroke="#1e2030" />
+          <XAxis
+            dataKey={xKey}
+            tick={{ fill: "#6b7089", fontSize: 11 }}
+            axisLine={{ stroke: "#1e2030" }}
+            tickLine={{ stroke: "#1e2030" }}
+          />
+          <YAxis
+            tick={{ fill: "#6b7089", fontSize: 11 }}
+            axisLine={{ stroke: "#1e2030" }}
+            tickLine={{ stroke: "#1e2030" }}
+          />
+          <Tooltip
+            contentStyle={{
+              background: "#12131a",
+              border: "1px solid #2a2b3a",
+              borderRadius: 8,
+              fontSize: 12,
+              color: "#e2e4ed",
+            }}
+          />
+          {lines.length > 1 && (
+            <Legend
+              wrapperStyle={{ fontSize: 11, color: "#6b7089" }}
+            />
+          )}
+          {lines.map((line, i) => {
+            const color = CHART_COLORS[i % CHART_COLORS.length];
+            if (type === "bar") {
+              return (
+                <Bar
+                  key={line.key}
+                  dataKey={line.key}
+                  name={line.label}
+                  fill={color}
+                  radius={[4, 4, 0, 0]}
+                />
+              );
+            } else if (type === "area") {
+              return (
+                <Area
+                  key={line.key}
+                  type="monotone"
+                  dataKey={line.key}
+                  name={line.label}
+                  stroke={color}
+                  fill={color}
+                  fillOpacity={0.15}
+                  strokeWidth={2}
+                />
+              );
+            } else {
+              return (
+                <Line
+                  key={line.key}
+                  type="monotone"
+                  dataKey={line.key}
+                  name={line.label}
+                  stroke={color}
+                  strokeWidth={2}
+                  dot={{ fill: color, r: 3 }}
+                  activeDot={{ r: 5 }}
+                />
+              );
+            }
+          })}
+        </ChartComponent>
+      </ResponsiveContainer>
+    </div>
+  );
+}
+
+// Render a chat message with markdown + inline charts
+function ChatMessageContent({ content, role }) {
+  if (role === "user") {
+    return <span>{content}</span>;
+  }
+
+  const blocks = parseChatResponse(content);
+
+  return (
+    <div>
+      {blocks.map((block, i) => {
+        if (block.type === "chart") {
+          return <ChartBlock key={i} spec={block.content} />;
+        }
+        // Text block: split by newlines and render markdown
+        return (
+          <div key={i} style={{ whiteSpace: "pre-wrap" }}>
+            {block.content.split("\n").map((line, li) => (
+              <span key={li}>
+                {renderMarkdown(line)}
+                {li < block.content.split("\n").length - 1 && <br />}
+              </span>
+            ))}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
 
 export default function App() {
   const [stage, setStage] = useState("upload");
@@ -80,7 +311,6 @@ export default function App() {
   const [showApiInput, setShowApiInput] = useState(false);
   const fileInputRef = useRef(null);
 
-  // Sprint 2: Chat state
   const [chatMessages, setChatMessages] = useState([]);
   const [chatInput, setChatInput] = useState("");
   const [chatLoading, setChatLoading] = useState(false);
@@ -280,6 +510,11 @@ ${dataStr}`;
     setChatInput("");
     setChatLoading(true);
 
+    // Reset textarea height
+    if (chatInputRef.current) {
+      chatInputRef.current.style.height = "auto";
+    }
+
     const dataContext = buildDataContext();
     const apiMessages = [
       { role: "user", content: `Here is the dataset context and initial analysis for reference:\n\n${dataContext}` },
@@ -298,7 +533,7 @@ ${dataStr}`;
         },
         body: JSON.stringify({
           model: "claude-sonnet-4-20250514",
-          max_tokens: 2000,
+          max_tokens: 3000,
           system: CHAT_SYSTEM_PROMPT,
           messages: apiMessages,
         }),
@@ -370,24 +605,22 @@ ${dataStr}`;
             fontSize: 16, fontWeight: 700,
           }}>T</div>
           <span style={{ fontSize: 18, fontWeight: 600, letterSpacing: "-0.02em" }}>TrendReader</span>
-          <span style={{ fontSize: 12, color: "#6b7089", marginLeft: 4, fontFamily: "'DM Mono', monospace" }}>v0.2</span>
+          <span style={{ fontSize: 12, color: "#6b7089", marginLeft: 4, fontFamily: "'DM Mono', monospace" }}>v0.3</span>
         </div>
         {stage !== "upload" && (
           <button onClick={resetAll} style={{
             background: "transparent", border: "1px solid #2a2b3a", color: "#6b7089",
             padding: "6px 14px", borderRadius: 6, cursor: "pointer", fontSize: 13,
-          }}>
-            New Analysis
-          </button>
+          }}>New Analysis</button>
         )}
       </div>
 
       <div style={{ maxWidth: 960, margin: "0 auto", padding: "40px 24px" }}>
 
-        {/* Upload Stage */}
+        {/* Upload */}
         {stage === "upload" && (
           <div style={{ textAlign: "center" }}>
-            <h1 style={{ fontSize: 36, fontWeight: 300, letterSpacing: "-0.03em", marginBottom: 8, color: "#e2e4ed" }}>
+            <h1 style={{ fontSize: 36, fontWeight: 300, letterSpacing: "-0.03em", marginBottom: 8 }}>
               Drop your data. State your objective.
             </h1>
             <p style={{ color: "#6b7089", fontSize: 15, marginBottom: 48 }}>
@@ -416,7 +649,7 @@ ${dataStr}`;
           </div>
         )}
 
-        {/* Preview Stage */}
+        {/* Preview */}
         {stage === "preview" && parsedData && (
           <div>
             <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 24 }}>
@@ -474,7 +707,7 @@ ${dataStr}`;
           </div>
         )}
 
-        {/* Objective Stage */}
+        {/* Objective */}
         {stage === "objective" && (
           <div>
             <div style={{
@@ -544,7 +777,7 @@ ${dataStr}`;
           </div>
         )}
 
-        {/* Analyzing Stage */}
+        {/* Analyzing */}
         {stage === "analyzing" && (
           <div style={{ textAlign: "center", padding: "120px 0" }}>
             <div style={{
@@ -558,7 +791,7 @@ ${dataStr}`;
           </div>
         )}
 
-        {/* Results Stage */}
+        {/* Results */}
         {stage === "results" && analysis && (
           <div>
             {/* Summary */}
@@ -573,7 +806,7 @@ ${dataStr}`;
               <p style={{ fontSize: 15, lineHeight: 1.7, color: "#c0c3d4", margin: 0 }}>{analysis.summary}</p>
             </div>
 
-            {/* Meta bar */}
+            {/* Meta */}
             <div style={{ display: "flex", gap: 16, marginBottom: 32, flexWrap: "wrap" }}>
               <div style={{ background: "#0d0e14", border: "1px solid #1a1b26", borderRadius: 8, padding: "8px 14px", fontSize: 12 }}>
                 <span style={{ color: "#3d4058" }}>Source: </span>
@@ -585,7 +818,7 @@ ${dataStr}`;
               </div>
             </div>
 
-            {/* Analysis Sections */}
+            {/* Findings */}
             {[
               { key: "trends", label: "Trends", icon: "↗" },
               { key: "anomalies", label: "Anomalies", icon: "⚡" },
@@ -636,7 +869,7 @@ ${dataStr}`;
               </div>
             ))}
 
-            {/* ==================== SPRINT 2: CHAT ==================== */}
+            {/* ==================== CHAT ==================== */}
             <div style={{ borderTop: "1px solid #1a1b26", marginTop: 20, paddingTop: 32 }}>
               <h3 style={{
                 fontSize: 13, fontWeight: 600, color: "#6b7089",
@@ -645,17 +878,18 @@ ${dataStr}`;
               }}>
                 💬 Follow-up
                 <span style={{ marginLeft: 8, fontSize: 11, color: "#3d4058", fontWeight: 400, textTransform: "none", letterSpacing: 0 }}>
-                  drill in, ask "what if", challenge findings
+                  drill in, ask "what if", request charts
                 </span>
               </h3>
 
-              {/* Chat Messages */}
+              {/* Messages */}
               {chatMessages.length > 0 && (
                 <div style={{ marginBottom: 16, display: "flex", flexDirection: "column", gap: 12 }}>
                   {chatMessages.map((msg, i) => (
                     <div key={i} style={{ display: "flex", justifyContent: msg.role === "user" ? "flex-end" : "flex-start" }}>
                       <div style={{
-                        maxWidth: "85%", padding: "12px 16px",
+                        maxWidth: msg.role === "user" ? "85%" : "95%",
+                        padding: "12px 16px",
                         borderRadius: msg.role === "user" ? "12px 12px 4px 12px" : "12px 12px 12px 4px",
                         background: msg.role === "user"
                           ? "linear-gradient(135deg, rgba(79,143,250,0.15), rgba(99,102,241,0.1))"
@@ -674,8 +908,9 @@ ${dataStr}`;
                         <div style={{
                           fontSize: 13, lineHeight: 1.7,
                           color: msg.role === "user" ? "#e2e4ed" : "#9a9db5",
-                          whiteSpace: "pre-wrap",
-                        }}>{msg.content}</div>
+                        }}>
+                          <ChatMessageContent content={msg.content} role={msg.role} />
+                        </div>
                       </div>
                     </div>
                   ))}
@@ -713,9 +948,9 @@ ${dataStr}`;
                   {[
                     "Drill into EMEA performance",
                     "What if we cut Pod 4 pricing by 15%?",
-                    "Which segment should we double down on?",
-                    "Compare DTC vs Retail Partners unit economics",
-                    "What's driving the churn increase?",
+                    "Chart churn rate by geo over time",
+                    "Compare DTC vs Retail unit economics",
+                    "Show me MRR trend as a line chart",
                   ].map((s, i) => (
                     <button key={i} onClick={() => { setChatInput(s); chatInputRef.current?.focus(); }} style={{
                       background: "#0d0e14", border: "1px solid #1e2030",
@@ -729,14 +964,14 @@ ${dataStr}`;
                 </div>
               )}
 
-              {/* Chat Input */}
+              {/* Input */}
               <div style={{ display: "flex", gap: 10, alignItems: "flex-end" }}>
                 <textarea
                   ref={chatInputRef}
                   value={chatInput}
                   onChange={(e) => setChatInput(e.target.value)}
                   onKeyDown={handleChatKeyDown}
-                  placeholder="Ask a follow-up question..."
+                  placeholder="Ask a follow-up or request a chart..."
                   rows={1}
                   style={{
                     flex: 1, padding: "12px 16px",
@@ -764,7 +999,7 @@ ${dataStr}`;
                   fontSize: 14, fontWeight: 500, minHeight: 44, whiteSpace: "nowrap",
                 }}>Send →</button>
               </div>
-              <p style={{ fontSize: 11, color: "#3d4058", marginTop: 8 }}>Enter to send · Shift+Enter for new line</p>
+              <p style={{ fontSize: 11, color: "#3d4058", marginTop: 8 }}>Enter to send · Shift+Enter for new line · Try "chart churn by geo"</p>
             </div>
           </div>
         )}
