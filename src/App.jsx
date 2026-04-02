@@ -56,12 +56,43 @@ Rules:
 - Severity should reflect business impact, not statistical significance
 - Be opinionated — say what you think is happening, don't hedge`;
 
+const ENRICHMENT_SYSTEM_PROMPT = `You are a market research analyst. Given a dataset description and analytical objective, search the web for relevant external context that would help interpret the data.
+
+Look for:
+- Industry benchmarks (e.g., typical churn rates, CAC benchmarks, ARPU comparisons)
+- Competitor data or market trends
+- Macroeconomic factors that might explain patterns
+- Recent news about the industry or relevant companies
+
+Respond ONLY with valid JSON (no markdown, no backticks, no preamble). Use this exact schema:
+
+{
+  "market_context": [
+    {
+      "title": "Short context title",
+      "detail": "What you found and why it matters for interpreting this data",
+      "source": "Where this information came from",
+      "relevance": "high|medium|low"
+    }
+  ]
+}
+
+Rules:
+- Return 3-5 context items
+- Each must be genuinely useful for interpreting the dataset
+- Include the source URL or publication name in the "source" field
+- Rank by relevance to the stated objective
+- Be specific with numbers and benchmarks where possible
+- Do NOT include any citation tags, HTML tags, or XML tags in your response — plain text only inside JSON strings
+- Synthesize findings in your own words`;
+
 const CHAT_SYSTEM_PROMPT = `You are an elite strategic finance analyst continuing a conversation about a dataset. You have already provided an initial analysis and the user is now asking follow-up questions.
 
 You have access to:
 1. The original dataset context (columns, summary stats, sample rows)
 2. Your initial analysis findings
-3. The conversation history
+3. External market context from web research
+4. The conversation history
 
 Rules:
 - Be specific — reference actual data points, column names, values
@@ -69,6 +100,7 @@ Rules:
 - If the user asks a "what if" scenario, model it with the data you have and state assumptions clearly
 - Keep responses concise but thorough — 2-4 paragraphs max unless they ask for more
 - You can use **bold** for emphasis
+- When relevant, reference the external market context to benchmark or contextualize findings
 - Be opinionated and direct — don't hedge
 
 CHARTS:
@@ -100,14 +132,13 @@ Chart rules:
 - Compute the data from the dataset context — do not make up numbers
 - Keep data points reasonable (5-15 points ideal)`;
 
-// Simple markdown renderer for **bold** and *italic*
+// Simple markdown renderer for **bold**
 function renderMarkdown(text) {
   const parts = [];
   let remaining = text;
   let key = 0;
 
   while (remaining.length > 0) {
-    // Bold: **text**
     const boldMatch = remaining.match(/\*\*(.+?)\*\*/);
     if (boldMatch) {
       const idx = boldMatch.index;
@@ -129,7 +160,6 @@ function renderMarkdown(text) {
   return parts;
 }
 
-// Parse chat response into text blocks and chart blocks
 function parseChatResponse(content) {
   const blocks = [];
   let remaining = content;
@@ -141,7 +171,6 @@ function parseChatResponse(content) {
       break;
     }
 
-    // Text before chart
     const textBefore = remaining.slice(0, chartStart).trim();
     if (textBefore) blocks.push({ type: "text", content: textBefore });
 
@@ -166,7 +195,6 @@ function parseChatResponse(content) {
   return blocks;
 }
 
-// Chart renderer
 function ChartBlock({ spec }) {
   const { type, title, xKey, lines, data } = spec;
 
@@ -175,7 +203,6 @@ function ChartBlock({ spec }) {
   }
 
   const ChartComponent = type === "line" ? LineChart : type === "area" ? AreaChart : BarChart;
-  const DataComponent = type === "line" ? Line : type === "area" ? Area : Bar;
 
   return (
     <div style={{
@@ -217,48 +244,16 @@ function ChartBlock({ spec }) {
             }}
           />
           {lines.length > 1 && (
-            <Legend
-              wrapperStyle={{ fontSize: 11, color: "#6b7089" }}
-            />
+            <Legend wrapperStyle={{ fontSize: 11, color: "#6b7089" }} />
           )}
           {lines.map((line, i) => {
             const color = CHART_COLORS[i % CHART_COLORS.length];
             if (type === "bar") {
-              return (
-                <Bar
-                  key={line.key}
-                  dataKey={line.key}
-                  name={line.label}
-                  fill={color}
-                  radius={[4, 4, 0, 0]}
-                />
-              );
+              return <Bar key={line.key} dataKey={line.key} name={line.label} fill={color} radius={[4, 4, 0, 0]} />;
             } else if (type === "area") {
-              return (
-                <Area
-                  key={line.key}
-                  type="monotone"
-                  dataKey={line.key}
-                  name={line.label}
-                  stroke={color}
-                  fill={color}
-                  fillOpacity={0.15}
-                  strokeWidth={2}
-                />
-              );
+              return <Area key={line.key} type="monotone" dataKey={line.key} name={line.label} stroke={color} fill={color} fillOpacity={0.15} strokeWidth={2} />;
             } else {
-              return (
-                <Line
-                  key={line.key}
-                  type="monotone"
-                  dataKey={line.key}
-                  name={line.label}
-                  stroke={color}
-                  strokeWidth={2}
-                  dot={{ fill: color, r: 3 }}
-                  activeDot={{ r: 5 }}
-                />
-              );
+              return <Line key={line.key} type="monotone" dataKey={line.key} name={line.label} stroke={color} strokeWidth={2} dot={{ fill: color, r: 3 }} activeDot={{ r: 5 }} />;
             }
           })}
         </ChartComponent>
@@ -267,7 +262,6 @@ function ChartBlock({ spec }) {
   );
 }
 
-// Render a chat message with markdown + inline charts
 function ChatMessageContent({ content, role }) {
   if (role === "user") {
     return <span>{content}</span>;
@@ -281,7 +275,6 @@ function ChatMessageContent({ content, role }) {
         if (block.type === "chart") {
           return <ChartBlock key={i} spec={block.content} />;
         }
-        // Text block: split by newlines and render markdown
         return (
           <div key={i} style={{ whiteSpace: "pre-wrap" }}>
             {block.content.split("\n").map((line, li) => (
@@ -311,11 +304,16 @@ export default function App() {
   const [showApiInput, setShowApiInput] = useState(false);
   const fileInputRef = useRef(null);
 
+  // Chat
   const [chatMessages, setChatMessages] = useState([]);
   const [chatInput, setChatInput] = useState("");
   const [chatLoading, setChatLoading] = useState(false);
   const chatEndRef = useRef(null);
   const chatInputRef = useRef(null);
+
+  // Sprint 4: Web enrichment
+  const [enrichment, setEnrichment] = useState(null);
+  const [enrichmentLoading, setEnrichmentLoading] = useState(false);
 
   useEffect(() => {
     if (chatEndRef.current) {
@@ -408,6 +406,13 @@ export default function App() {
       ...parsedData.slice(-5),
     ];
 
+    // Include enrichment context if available
+    const enrichmentContext = enrichment && enrichment.market_context
+      ? `\n\nEXTERNAL MARKET CONTEXT:\n${enrichment.market_context.map((c) =>
+          `- [${c.relevance}] ${c.title}: ${c.detail} (Source: ${c.source})`
+        ).join("\n")}`
+      : "";
+
     return `DATASET CONTEXT:
 File: ${fileName} (${rowCount} rows, ${columns.length} columns)
 Columns: ${columns.join(", ")}
@@ -428,8 +433,82 @@ KEY FINDINGS:
 ${analysis.trends.map((t) => `- [TREND/${t.severity}] ${t.title}: ${t.detail}`).join("\n")}
 ${analysis.anomalies.map((a) => `- [ANOMALY/${a.severity}] ${a.title}: ${a.detail}`).join("\n")}
 ${analysis.investigation_flags.map((f) => `- [FLAG/${f.severity}] ${f.title}: ${f.detail}`).join("\n")}
+${enrichmentContext}
 
 ORIGINAL OBJECTIVE: ${objective}`;
+  };
+
+  // Sprint 4: Web enrichment call
+  const runWebEnrichment = async (key) => {
+    setEnrichmentLoading(true);
+
+    // Extract keywords from columns and objective for search
+    const keywords = [
+      ...columns.slice(0, 5),
+      ...objective.split(/\s+/).filter((w) => w.length > 4).slice(0, 5),
+    ].join(", ");
+
+    const enrichmentMessage = `I'm analyzing a dataset with these characteristics:
+
+FILE: ${fileName}
+COLUMNS: ${columns.join(", ")}
+ROWS: ${rowCount}
+OBJECTIVE: ${objective}
+
+Key terms from the data: ${keywords}
+
+Search the web for relevant industry benchmarks, competitor data, market trends, and macroeconomic context that would help interpret this data. Focus on finding specific numbers and benchmarks.`;
+
+    try {
+      const response = await fetch("https://api.anthropic.com/v1/messages", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-api-key": key,
+          "anthropic-version": "2023-06-01",
+          "anthropic-dangerous-direct-browser-access": "true",
+        },
+        body: JSON.stringify({
+          model: "claude-sonnet-4-20250514",
+          max_tokens: 2000,
+          system: ENRICHMENT_SYSTEM_PROMPT,
+          tools: [
+            {
+              type: "web_search_20250305",
+              name: "web_search",
+            },
+          ],
+          messages: [{ role: "user", content: enrichmentMessage }],
+        }),
+      });
+
+      if (!response.ok) {
+        console.error("Enrichment API error:", response.status);
+        return;
+      }
+
+      const result = await response.json();
+      const text = result.content
+        .filter((b) => b.type === "text")
+        .map((b) => b.text)
+        .join("");
+
+      if (text.trim()) {
+        const clean = text
+          .replace(/```json|```/g, "")
+          .replace(/<cite[^>]*>/g, "")
+          .replace(/<\/cite>/g, "")
+          .replace(/]*>/g, "")
+          .replace(/<\/antml:cite>/g, "")
+          .trim();
+        const parsed = JSON.parse(clean);
+        setEnrichment(parsed);
+      }
+    } catch (err) {
+      console.error("Enrichment failed:", err.message);
+    } finally {
+      setEnrichmentLoading(false);
+    }
   };
 
   const runAnalysis = async () => {
@@ -442,6 +521,7 @@ ORIGINAL OBJECTIVE: ${objective}`;
 
     setStage("analyzing");
     setError(null);
+    setEnrichment(null);
 
     const dataSlice = parsedData.slice(0, 500);
     const dataStr = JSON.stringify(dataSlice, null, 2);
@@ -455,6 +535,7 @@ COLUMNS: ${columns.join(", ")}
 DATA:
 ${dataStr}`;
 
+    // Fire analysis first
     try {
       const response = await fetch("https://api.anthropic.com/v1/messages", {
         method: "POST",
@@ -488,6 +569,9 @@ ${dataStr}`;
       setAnalysis(parsed);
       setChatMessages([]);
       setStage("results");
+
+      // Fire enrichment after analysis succeeds (non-blocking)
+      runWebEnrichment(key);
     } catch (err) {
       setError("Analysis failed: " + err.message);
       setStage("objective");
@@ -510,15 +594,14 @@ ${dataStr}`;
     setChatInput("");
     setChatLoading(true);
 
-    // Reset textarea height
     if (chatInputRef.current) {
       chatInputRef.current.style.height = "auto";
     }
 
     const dataContext = buildDataContext();
     const apiMessages = [
-      { role: "user", content: `Here is the dataset context and initial analysis for reference:\n\n${dataContext}` },
-      { role: "assistant", content: "Understood. I have the full dataset context and initial analysis loaded. Ready for your follow-up questions." },
+      { role: "user", content: `Here is the dataset context, initial analysis, and external market research for reference:\n\n${dataContext}` },
+      { role: "assistant", content: "Understood. I have the full dataset context, initial analysis, and external market context loaded. Ready for your follow-up questions." },
       ...updatedMessages,
     ];
 
@@ -579,6 +662,13 @@ ${dataStr}`;
     setError(null);
     setChatMessages([]);
     setChatInput("");
+    setEnrichment(null);
+  };
+
+  const RELEVANCE_COLORS = {
+    high: { border: "#4f8ffa", bg: "rgba(79,143,250,0.06)", badge: "#4f8ffa" },
+    medium: { border: "#a78bfa", bg: "rgba(167,139,250,0.06)", badge: "#a78bfa" },
+    low: { border: "#1e2030", bg: "rgba(30,32,48,0.5)", badge: "#6b7089" },
   };
 
   return (
@@ -605,7 +695,7 @@ ${dataStr}`;
             fontSize: 16, fontWeight: 700,
           }}>T</div>
           <span style={{ fontSize: 18, fontWeight: 600, letterSpacing: "-0.02em" }}>TrendReader</span>
-          <span style={{ fontSize: 12, color: "#6b7089", marginLeft: 4, fontFamily: "'DM Mono', monospace" }}>v0.3</span>
+          <span style={{ fontSize: 12, color: "#6b7089", marginLeft: 4, fontFamily: "'DM Mono', monospace" }}>v0.4</span>
         </div>
         {stage !== "upload" && (
           <button onClick={resetAll} style={{
@@ -869,6 +959,79 @@ ${dataStr}`;
               </div>
             ))}
 
+            {/* ==================== SPRINT 4: MARKET CONTEXT ==================== */}
+            <div style={{ marginBottom: 40 }}>
+              <h3 style={{
+                fontSize: 13, fontWeight: 600, color: "#6b7089",
+                letterSpacing: "0.08em", textTransform: "uppercase",
+                marginBottom: 16, fontFamily: "'DM Mono', monospace",
+              }}>
+                🌐 Market Context
+                <span style={{ marginLeft: 8, fontSize: 11, color: "#3d4058", fontWeight: 400, textTransform: "none", letterSpacing: 0 }}>
+                  {enrichmentLoading ? "searching..." : enrichment ? `${enrichment.market_context?.length || 0} findings` : "pending"}
+                </span>
+              </h3>
+
+              {enrichmentLoading && (
+                <div style={{
+                  background: "#0d0e14", border: "1px solid #1e2030",
+                  borderRadius: 10, padding: "20px",
+                  display: "flex", alignItems: "center", gap: 12,
+                }}>
+                  <div style={{
+                    width: 20, height: 20,
+                    border: "2px solid #1a1b26", borderTopColor: "#a78bfa",
+                    borderRadius: "50%", animation: "spin 0.8s linear infinite",
+                  }} />
+                  <span style={{ fontSize: 13, color: "#6b7089" }}>Searching the web for industry benchmarks and context...</span>
+                </div>
+              )}
+
+              {enrichment && enrichment.market_context && (
+                <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                  {enrichment.market_context.map((item, i) => {
+                    const rc = RELEVANCE_COLORS[item.relevance] || RELEVANCE_COLORS.low;
+                    return (
+                      <div key={i} style={{
+                        background: rc.bg,
+                        border: `1px solid ${rc.border}`,
+                        borderRadius: 10, padding: "16px 20px",
+                      }}>
+                        <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 8 }}>
+                          <span style={{
+                            fontSize: 10, fontWeight: 600, textTransform: "uppercase",
+                            letterSpacing: "0.08em", color: rc.badge,
+                            background: `${rc.badge}18`, padding: "2px 8px",
+                            borderRadius: 4, fontFamily: "'DM Mono', monospace",
+                          }}>{item.relevance}</span>
+                          <span style={{ fontSize: 15, fontWeight: 500, color: "#e2e4ed" }}>{item.title}</span>
+                        </div>
+                        <p style={{ fontSize: 13, lineHeight: 1.65, color: "#9a9db5", margin: 0 }}>{item.detail}</p>
+                        {item.source && (
+                          <div style={{ marginTop: 8 }}>
+                            <span style={{
+                              fontSize: 11, color: "#a78bfa",
+                              fontFamily: "'DM Mono', monospace",
+                            }}>↗ {item.source}</span>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+
+              {!enrichmentLoading && !enrichment && (
+                <div style={{
+                  background: "#0d0e14", border: "1px solid #1e2030",
+                  borderRadius: 10, padding: "16px 20px",
+                  color: "#3d4058", fontSize: 13,
+                }}>
+                  Web enrichment unavailable — analysis based on uploaded data only.
+                </div>
+              )}
+            </div>
+
             {/* ==================== CHAT ==================== */}
             <div style={{ borderTop: "1px solid #1a1b26", marginTop: 20, paddingTop: 32 }}>
               <h3 style={{
@@ -949,7 +1112,7 @@ ${dataStr}`;
                     "Drill into EMEA performance",
                     "What if we cut Pod 4 pricing by 15%?",
                     "Chart churn rate by geo over time",
-                    "Compare DTC vs Retail unit economics",
+                    "How do we compare to industry benchmarks?",
                     "Show me MRR trend as a line chart",
                   ].map((s, i) => (
                     <button key={i} onClick={() => { setChatInput(s); chatInputRef.current?.focus(); }} style={{
@@ -999,7 +1162,7 @@ ${dataStr}`;
                   fontSize: 14, fontWeight: 500, minHeight: 44, whiteSpace: "nowrap",
                 }}>Send →</button>
               </div>
-              <p style={{ fontSize: 11, color: "#3d4058", marginTop: 8 }}>Enter to send · Shift+Enter for new line · Try "chart churn by geo"</p>
+              <p style={{ fontSize: 11, color: "#3d4058", marginTop: 8 }}>Enter to send · Shift+Enter for new line · Try "how do we compare to industry benchmarks?"</p>
             </div>
           </div>
         )}
